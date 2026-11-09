@@ -1,3 +1,4 @@
+from ctypes import windll
 import numpy as np
 import win32gui
 import win32ui
@@ -51,6 +52,17 @@ class WindowCapture:
             None: This function does not raise any specific exceptions.
         """
         try:
+            # window must exist and not be minimized, otherwise BitBlt returns black frame
+            if not win32gui.IsWindow(self.hwnd):
+                print('Exception: window no longer exists')
+                return None
+            if win32gui.IsIconic(self.hwnd):
+                win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
+            try:
+                win32gui.SetForegroundWindow(self.hwnd)
+            except Exception:
+                pass
+
             # get the window image data
             wDC = win32gui.GetWindowDC(self.hwnd)
             dcObj = win32ui.CreateDCFromHandle(wDC)
@@ -58,15 +70,25 @@ class WindowCapture:
             dataBitMap = win32ui.CreateBitmap()
             dataBitMap.CreateCompatibleBitmap(dcObj, self.w, self.h)
             cDC.SelectObject(dataBitMap)
-            cDC.BitBlt((0, 0), (self.w, self.h), dcObj, (0, 0), win32con.SRCCOPY)
-            #cDC.BitBlt((0, 0), (self.w, self.h), dcObj, (self.cropped_x, self.cropped_y), win32con.SRCCOPY)
 
-            # convert the raw data into a format opencv can read
-            signedIntsArray = dataBitMap.GetBitmapBits(True)
-            img = np.fromstring(signedIntsArray, dtype='uint8')
-            img.shape = (self.h, self.w, 4)
-            # save image to file
-            #dataBitMap.SaveBitmapFile(cDC, 'debug.bmp')
+            def grab_to_array():
+                signedIntsArray = dataBitMap.GetBitmapBits(True)
+                arr = np.fromstring(signedIntsArray, dtype='uint8')
+                arr.shape = (self.h, self.w, 4)
+                return np.ascontiguousarray(arr)
+
+            img = None
+            # method 1: PrintWindow (PW_RENDERFULLCONTENT = 2), works when occluded
+            if windll.user32.PrintWindow(self.hwnd, cDC.GetSafeHdc(), 2):
+                candidate = grab_to_array()
+                if candidate[..., :3].mean() >= 5:
+                    img = candidate
+            # method 2: BitBlt fallback (or if PrintWindow gave black frame)
+            if img is None:
+                cDC.BitBlt((0, 0), (self.w, self.h), dcObj, (0, 0), win32con.SRCCOPY)
+                candidate = grab_to_array()
+                if candidate[..., :3].mean() >= 5:
+                    img = candidate
 
             # free resources
             dcObj.DeleteDC()
@@ -74,17 +96,16 @@ class WindowCapture:
             win32gui.ReleaseDC(self.hwnd, wDC)
             win32gui.DeleteObject(dataBitMap.GetHandle())
 
+            if img is None:
+                print('Exception: captured black frame (window occluded or minimized)')
+                return None
+
             # drop the alpha channel, or cv.matchTemplate() will throw an error like:
             #   error: (-215:Assertion failed) (depth == CV_8U || depth == CV_32F) && type == _templ.type()
             #   && _img.dims() <= 2 in function 'cv::matchTemplate'
             #img = img[...,:3]
 
-            # make image C_CONTIGUOUS to avoid errors that look like:
-            #   File ... in draw_rectangles
-            #   TypeError: an integer is required (got type tuple)
-            # see the discussion here:
-            # https://github.com/opencv/opencv/issues/14866#issuecomment-580207109
-            img = np.ascontiguousarray(img)
+            return img
 
         except Exception as e:
             print(f'Exception: {e}')

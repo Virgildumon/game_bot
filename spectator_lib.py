@@ -88,10 +88,29 @@ class Spectator:
             time.sleep(1)
             pyautogui.press('y')  # demount
 
-        def wait_bot_at_gate():
+        def wait_bot_at_gate(max_time=30):
             # trigger actions
             self.actions = Actions()
-            self.get_data()
+
+            # wait until bot icon is detected on minimap (game may still be loading)
+            t0 = time.time()
+            last_log = 0
+            while self.data.get('bot_pos_minimap') is None:
+                if time.time() - t0 > max_time:
+                    if self.data.get('frame') is not None:
+                        cv.imwrite('debug_timeout.png', self.data['frame'])
+                        print('Saved debug screenshot to debug_timeout.png')
+                    raise Exception(f'bot_pos_minimap still None after {max_time} sec of waiting')
+                self.get_data()
+                if time.time() - last_log > 5:
+                    last_log = time.time()
+                    print(f'waiting for bot_pos_minimap... data: '
+                          f'frame={self.data.get("frame") is not None}, '
+                          f'bot_dead={self.data.get("bot_dead")}, '
+                          f'bot_pos_frame={self.data.get("bot_pos_frame") is not None}, '
+                          f'bot_health={self.data.get("bot_health")}, '
+                          f'minions={self.data.get("minions") is not None}')
+
             available, err_desc = self.actions.objects['hide_behind_gate'].is_available(**self.data)
             if not available:
                 raise Exception(err_desc)
@@ -114,7 +133,7 @@ class Spectator:
             pyautogui.click(button='left')
             time.sleep(sleep_time)
 
-        def wait_blue_minion_in_front(max_time=10):
+        def wait_blue_minion_in_front(max_time=30):
             t0 = time.time()
             while time.time() - t0 < max_time:
                 self.get_data()
@@ -180,8 +199,13 @@ class Spectator:
             'minions': None
         }
 
-        # frame, frame_hsv
-        frame = self.window.get_screenshot()
+        # frame, frame_hsv (retry: transient black frames / occlusion)
+        frame = None
+        for _ in range(10):
+            frame = self.window.get_screenshot()
+            if frame is not None:
+                break
+            time.sleep(0.1)
         if frame is None:
             return  # error ! no other data can be extracted in "frame" is None
         frame_hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
@@ -193,8 +217,22 @@ class Spectator:
             bot_pos_frame = {'health_bar': bot_pos_frame['health_bar'][1],
                              'bounding_box': bot_pos_frame['bounding_box'][1],
                              'circle': bot_pos_frame['circle'][1]}
-        # bot_pos_minimap
+        # bot_pos_minimap (retry with fresh frames: detection is flaky frame-to-frame)
         bot_pos_minimap, desc = get_bot_icon_position(frame)
+        for _ in range(30):
+            if bot_pos_minimap is not None:
+                break
+            time.sleep(0.1)
+            new_frame = self.window.get_screenshot()
+            if new_frame is not None:
+                frame = new_frame
+                frame_hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
+                bot_pos_minimap, desc = get_bot_icon_position(frame)
+        # fallback: reuse last known position (icon moves slowly on minimap)
+        if bot_pos_minimap is None and getattr(self, '_last_bot_pos_minimap', None) is not None:
+            bot_pos_minimap = self._last_bot_pos_minimap
+        else:
+            self._last_bot_pos_minimap = bot_pos_minimap
         # bot_health, bot_mana
         bot_health, err_desc = get_bot_health_value(frame)
         bot_mana, err_desc = get_bot_mana_value(frame)
